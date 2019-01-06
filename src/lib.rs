@@ -174,6 +174,18 @@ pub struct IterMut<'a, T: 'a> {
 /// A draining iterator for `Slab`
 pub struct Drain<'a, T: 'a>(vec::Drain<'a, Entry<T>>);
 
+// Iterator to support aborting the rekey.
+// method with a closure would in any case need to handle the closure unwinding.
+// Need to keep the freelist valid.
+// cannot rely on drop,
+// this code should be rarely called, so keep the code simple and don't optimize for speed
+// cannot pop from the vector during iteration because that would leave .next too high.
+pub struct Rekey<'a, T> {
+    slab: &'a mut Slab<T>,
+    occupied_until: usize, // exclusive
+    vacant_after: usize, // inclusive
+}
+
 #[derive(Clone)]
 enum Entry<T> {
     Vacant(usize),
@@ -354,6 +366,12 @@ impl<T> Slab<T> {
     /// ```
     pub fn shrink_to_fit(&mut self) {
         self.entries.shrink_to_fit();
+    }
+
+    /// A method that replaces the vacant list would require users to remove
+    /// all later elements before 
+    pub fn compact(&mut self) -> Rekey<T> {
+        Rekey::new(self)
     }
 
     /// Clear the slab of all values.
@@ -858,6 +876,16 @@ impl<'a, T: 'a> fmt::Debug for Drain<'a, T> {
     }
 }
 
+impl<'a, T: 'a> fmt::Debug for Rekey<'a, T> where T: fmt::Debug {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("Rekey")
+            .field("compacted", &self.occupied_until)
+            .field("cleared", &(self.slab.entries.len()-self.vacant_after))
+            .field("remaining", &(self.slab.len-self.occupied_until))
+            .finish()
+    }
+}
+
 // ===== VacantEntry =====
 
 impl<'a, T> VacantEntry<'a, T> {
@@ -969,5 +997,59 @@ impl<'a, T> Iterator for Drain<'a, T> {
         }
 
         None
+    }
+}
+
+// ===== Rekey =====
+
+impl<'a, T> Rekey<'a, T> {
+    fn new(slab: &mut Slab<T>) -> Rekey<T> {
+        // empty vacant list in case the iterator is not dropped
+        slab.next = slab.entries.len();
+        Rekey {
+            slab: slab,
+            // short circuit if the vector is already compact.
+            occupied_until: if slab.len == slab.entries.len() {slab.len} else {0},
+            vacant_after: slab.entries.len(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for Rekey<'a, T> {
+    type Item = (usize, usize, &'a mut T);
+    fn next(&mut self) -> Option<(usize, usize, &'a mut T)> {
+        if self.vacant_after != self.slab.entries.len() {
+            // not the first call to next(), move the previously returned element
+            self.slab.entries.swap(self.occupied_until, self.vacant_after-1);
+        }
+        // find next vacant
+        while let Some(&Entry::Occupied(_)) = self.slab.entries.get(self.occupied_until) {
+            self.occupied_until += 1;
+        }
+        // find next occupied that needs to be moved
+        // for vacant_after to reach self.slab.len, the loop above will already have set 
+        while self.vacant_after > self.occupied_until {
+            self.vacant_after -= 1;
+            if let Some(&mut Entry::Occupied(ref mut v)) = self.slab.entries.get_mut(self.vacant_after) {
+                return Some((self.vacant_after, self.occupied_until, v));
+            }
+        }
+        None
+    }
+}
+
+impl<'a, T> Drop for Rekey<'a, T> {
+    fn drop(&mut self) {
+        // remove entries for successfully moved elements
+        self.slab.entries.truncate(self.vacant_after);
+        // update next to the new number of entries
+        self.slab.next = self.vacant_after;
+        // recreate freelist in case iteration was aborted
+        for i in (self.occupied_until..self.vacant_after).rev() {
+            if let Some(&mut Entry::Vacant(ref mut next)) = self.slab.entries.get_mut(i) {
+                *next = self.slab.next;
+                self.slab.next = i;
+            }
+        }
     }
 }
