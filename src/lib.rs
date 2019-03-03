@@ -102,6 +102,7 @@
 //!
 //! [`Slab::with_capacity`]: struct.Slab.html#with_capacity
 
+use std::hint::unreachable_unchecked;
 use std::iter::IntoIterator;
 use std::ops;
 use std::vec;
@@ -521,9 +522,12 @@ impl<T> Slab<T> {
     }
 
     /// Return a reference to the value associated with the given key without
-    /// performing bounds checking.
+    /// without checking that there is an element associated with that key.
     ///
-    /// This function should be used with care.
+    /// # Safety
+    ///
+    /// * The key must be within bounds
+    /// * There must be a value present at the slot the key refers to
     ///
     /// # Examples
     ///
@@ -539,14 +543,17 @@ impl<T> Slab<T> {
     pub unsafe fn get_unchecked(&self, key: usize) -> &T {
         match *self.entries.get_unchecked(key) {
             Entry::Occupied(ref val) => val,
-            _ => unreachable!(),
+            _ => unreachable_unchecked(),
         }
     }
 
     /// Return a mutable reference to the value associated with the given key
-    /// without performing bounds checking.
+    /// without checking that there is an element associated with that key.
     ///
-    /// This function should be used with care.
+    /// # Safety
+    ///
+    /// * The key must be within bounds
+    /// * There must be a value present at the slot the key refers to
     ///
     /// # Examples
     ///
@@ -565,7 +572,7 @@ impl<T> Slab<T> {
     pub unsafe fn get_unchecked_mut(&mut self, key: usize) -> &mut T {
         match *self.entries.get_unchecked_mut(key) {
             Entry::Occupied(ref mut val) => val,
-            _ => unreachable!(),
+            _ => unreachable_unchecked(),
         }
     }
 
