@@ -174,6 +174,12 @@ pub struct IterMut<'a, T: 'a> {
 /// A draining iterator for `Slab`
 pub struct Drain<'a, T: 'a>(vec::Drain<'a, Entry<T>>);
 
+/// An infinite iterator producing the keys future inserts into the `Slab`
+pub struct NextKeys<'a, T: 'a> {
+    entries: &'a [Entry<T>],
+    next: usize,
+}
+
 #[derive(Clone)]
 enum Entry<T> {
     Vacant(usize),
@@ -643,6 +649,48 @@ impl<T> Slab<T> {
         }
     }
 
+    /// Produce an infinite iterator of the keys for future `insert()`s.
+    ///
+    /// This can be used to insert multiple elements that referene each other.
+    /// The produced keys are only valid until an element is removed or the capacity is reduced.
+    /// The first produced key is identical to the key produced by `vacant_entry()`.
+    ///
+    /// # Examples
+    ///
+    /// Insert a pair of elements referencing each other:
+    ///
+    /// ```
+    /// # use slab::*;
+    /// # let mut slab = Slab::new();
+    ///
+    /// let (first, second) = {
+    ///     let mut keys = slab.next_keys();
+    ///     (keys.next().unwrap(), keys.next().unwrap())
+    /// };
+    /// slab.insert(second);
+    /// slab.insert(first);
+    /// assert_eq!(slab[first], second);
+    /// assert_eq!(slab[second], first);
+    /// ```
+    ///
+    /// Collect keys into a `Vec`, using `take()` to limit the iterator:
+    ///
+    /// ```
+    /// # use slab::*;
+    /// # let mut slab = Slab::new();
+    ///
+    /// let keys = slab.next_keys().take(4).collect::<Vec<usize>>();
+    /// for promised_key in keys {
+    ///     assert_eq!(slab.insert(""), promised_key);
+    /// }
+    /// ```
+    pub fn next_keys(&self) -> NextKeys<T> {
+        NextKeys {
+            entries: &self.entries,
+            next: self.next,
+        }
+    }
+
     /// Remove and return the value associated with the given key.
     ///
     /// The key is then released and may be associated with future stored
@@ -862,6 +910,14 @@ impl<'a, T: 'a> fmt::Debug for Drain<'a, T> {
     }
 }
 
+impl<'a, T: 'a> fmt::Debug for NextKeys<'a, T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("NextKeys")
+            .field("next_key", &self.next)
+            .finish()
+    }
+}
+
 // ===== VacantEntry =====
 
 impl<'a, T> VacantEntry<'a, T> {
@@ -973,5 +1029,21 @@ impl<'a, T> Iterator for Drain<'a, T> {
         }
 
         None
+    }
+}
+
+// ===== NextKeys =====
+
+impl<'a, T: 'a> Iterator for NextKeys<'a, T> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        let next = self.next;
+        match self.entries.get(self.next) {
+            Some(&Entry::Vacant(after)) => self.next = after,
+            None => self.next += 1,
+            Some(&Entry::Occupied(_)) => unreachable!(),
+        }
+        Some(next)
     }
 }

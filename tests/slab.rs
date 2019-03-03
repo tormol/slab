@@ -299,3 +299,24 @@ fn partially_consumed_drain() {
 
     assert!(slab.is_empty())
 }
+
+#[test]
+fn next_keys_with_vacant_entries() {
+    let mut slab = Slab::new();
+    for _ in 0..10 {
+        slab.insert(());
+    }
+    slab.remove(7);
+    slab.remove(0);
+    slab.remove(3);
+    slab.remove(9);
+
+    let mut next_keys = [0; 8];
+    for (promised_key, dst) in slab.next_keys().zip(&mut next_keys) {
+        *dst = promised_key;
+    }
+    assert_eq!(slab.vacant_entry().key(), next_keys[0]);
+    for &promised_key in &next_keys {
+        assert_eq!(slab.insert(()), promised_key);
+    }
+}
