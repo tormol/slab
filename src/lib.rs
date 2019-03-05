@@ -174,6 +174,13 @@ pub struct IterMut<'a, T: 'a> {
 /// A draining iterator for `Slab`
 pub struct Drain<'a, T: 'a>(vec::Drain<'a, Entry<T>>);
 
+/// An iterator that moves all values to the start of the `Slab`
+pub struct Compact<'a, T: 'a> {
+    slab: &'a mut Slab<T>,
+    filled_before: usize,
+    moved_after: usize,
+}
+
 #[derive(Clone)]
 enum Entry<T> {
     Vacant(usize),
@@ -398,6 +405,15 @@ impl<T> Slab<T> {
                 self.next = i;
                 remaining_vacant -= 1;
             }
+        }
+    }
+
+    /// Reduce the capacity as much as possible, changing the key for elements when necessary.
+    pub fn compact<F>(&mut self) -> Compact<T> {
+        Compact {
+            slab: self,
+            filled_before: 0,
+            moved_after: self.entries.len(),
         }
     }
 
@@ -1014,5 +1030,73 @@ impl<'a, T> Iterator for Drain<'a, T> {
         }
 
         None
+    }
+}
+
+// ===== Compact =====
+
+impl<'a, T> Compact<'a, T> {
+    /// Do not move any values
+    pub fn cancel_all(self) {
+        mem::forget(self);
+    }
+
+    /// Undo the previous `.next()` call, such that the value that was returned
+    /// is not moved.
+    pub fn cancel_last(mut self) {
+        if self.moved_after < self.slab.entries.len() {
+            self.filled_before -= 1;
+            self.moved_after += 1;
+        }
+    }
+
+    /// Increment self.filled_before such that it points to a vacant entry
+    fn next_vacant(&mut self) {
+        while let Some(&Entry::Occupied(_)) = self.slab.entries.get(self.filled_before) {
+            self.filled_before += 1;
+        }
+    }
+}
+
+impl<'a, T: 'a> Iterator for Compact<'a, T> {
+    type Item = (&'a mut T, usize, usize);
+
+    fn next<'b>(&'b mut self) -> Option<(&'a mut T, usize, usize)> {
+        // While there might be values that should be moved
+        while self.moved_after > self.slab.len {
+            self.moved_after -= 1;
+            let e: &'a mut Entry<T> = &mut self.slab.entries[self.moved_after];
+            if let &mut Entry::Occupied(ref mut value) = e {
+                // found one, now find a slot it can be moved to
+                self.next_vacant();
+                let to = self.filled_before;
+                // increment so that future calls to .next_vacant() don't return the same index
+                self.filled_before += 1;
+                return Some((value, self.moved_after, to));
+            }
+        }
+        None
+    }
+}
+
+impl<'a, T> Drop for Compact<'a, T> {
+    fn drop(&mut self) {
+        // Reset .next_vacant()
+        self.filled_before = 0;
+        // While there are entries that have been returned by .next()
+        while self.slab.entries.len() >= self.moved_after {
+            // Find a value that needs to be moved,
+            // by popping entries until we find an occopied one.
+            // (entries cannot be empty because 0 is not greater than anything)
+            if let Some(Entry::Occupied(value)) = self.slab.entries.pop() {
+                // Find the slot to put it in
+                self.next_vacant();
+                self.slab.entries[self.filled_before] = Entry::Occupied(value);
+                // Incrementing is optional here because the slot is now occupied
+                self.filled_before += 1;
+            }
+        }
+        self.slab.recreate_vacant_list();
+        self.slab.entries.shrink_to_fit();
     }
 }
