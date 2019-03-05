@@ -174,6 +174,13 @@ pub struct IterMut<'a, T: 'a> {
 /// A draining iterator for `Slab`
 pub struct Drain<'a, T: 'a>(vec::Drain<'a, Entry<T>>);
 
+/// An iterator that moves all values to the start of the `Slab`
+pub struct Compact<'a, T: 'a> {
+    entries: std::slice::IterMut<'a, Entry<T>>,
+    filled_before: usize,
+    vacant_head: &'a mut usize,
+}
+
 #[derive(Clone)]
 enum Entry<T> {
     Vacant(usize),
@@ -398,6 +405,44 @@ impl<T> Slab<T> {
                 self.next = i;
                 remaining_vacant -= 1;
             }
+        }
+    }
+
+    /// Returns an iterator which moves values to lower keys, allowing
+    /// capacity to be reduced afterward.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use slab::*;
+    ///
+    /// let mut slab = Slab::new();
+    /// for i in 0..10 {
+    ///     slab.insert(i);
+    /// }
+    /// slab.remove(0);
+    /// slab.remove(4);
+    /// slab.remove(5);
+    /// slab.remove(6);
+    ///
+    /// for (v, from, to) in slab.compact() {
+    ///     // replace from with to in places that refer to the values
+    /// }
+    /// assert_eq!(slab[0], 9);
+    /// assert_eq!(slab[1], 1);
+    /// assert!(!slab.contains(7));
+    /// assert!(slab.capacity() >= 10);
+    /// slab.shrink_to_fit();
+    /// assert!(slab.capacity() >= 6);
+    /// ```
+    pub fn compact(&mut self) -> Compact<T> {
+        // Clear vacant list (it will be recreated by the iterator)
+        self.next = self.entries.len();
+
+        Compact {
+            entries: self.entries.iter_mut(),
+            filled_before: 0,
+            vacant_head: &mut self.next,
         }
     }
 
@@ -903,6 +948,12 @@ impl<'a, T: 'a> fmt::Debug for Drain<'a, T> {
     }
 }
 
+impl<'a, T: 'a> fmt::Debug for Compact<'a, T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("Compact").finish()
+    }
+}
+
 // ===== VacantEntry =====
 
 impl<'a, T> VacantEntry<'a, T> {
@@ -1014,5 +1065,72 @@ impl<'a, T> Iterator for Drain<'a, T> {
         }
 
         None
+    }
+}
+
+// ===== Compact =====
+
+impl<'a, T: 'a> Compact<'a, T> {
+    fn next_to_move(&mut self) -> Option<(usize, &'a mut Entry<T>)> {
+        while let Some(high) = self.entries.next_back() {
+            let i = self.filled_before + self.entries.len();
+            if let Entry::Vacant(ref mut next) = *high {
+                *next = *self.vacant_head;
+                *self.vacant_head = i;
+                continue;
+            }
+            return Some((i, high));
+        }
+        None
+    }
+
+    fn next_to_fill(&mut self) -> Option<(usize, &'a mut Entry<T>)> {
+        while let Some(low) = self.entries.next() {
+            let i = self.filled_before;
+            self.filled_before += 1;
+            match *low {
+                Entry::Vacant(ref mut next) => *next = *self.vacant_head,
+                Entry::Occupied(_) => continue,
+            }
+            return Some((i, low));
+        }
+        None
+    }
+}
+
+impl<'a, T: 'a> Iterator for Compact<'a, T> {
+    type Item = (&'a mut T, usize, usize);
+
+    fn next<'b>(&'b mut self) -> Option<(&'a mut T, usize, usize)> {
+        // Find an occupied entry to move
+        let (from, high) = match self.next_to_move() {
+            Some(ret) => ret,
+            None => return None,
+        };
+        // Find a vacant entry to move into
+        let (to, low) = match self.next_to_fill() {
+            Some(ret) => ret,
+            None => return None,
+        };
+
+        // Point to the now vacant slot
+        *self.vacant_head = from;
+        // Perform the move unconditionally
+        // Must be done before returning it because we cannot keep a reference we return
+        mem::swap(high, low);
+
+        let value = match *low {
+            Entry::Occupied(ref mut value) => value,
+            Entry::Vacant(_) => unreachable!(),
+        };
+        Some((value, from, to))
+    }
+}
+
+impl<'a, T> Drop for Compact<'a, T> {
+    fn drop(&mut self) {
+        while let Some(_) = self.next_to_move() {
+            // Complete the vacant list
+        }
     }
 }
